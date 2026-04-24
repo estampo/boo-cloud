@@ -11,7 +11,6 @@ from typing import Annotated, Optional
 
 import click
 import typer
-from rich.markup import escape
 
 from boocloud import ui
 

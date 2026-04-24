@@ -111,7 +111,10 @@ class TestRunBridgeLocal:
 class TestRunBridgeFallback:
     def test_uses_local_binary_when_available(self):
         with (
-            patch("boocloud.bridge._find_local_bridge", return_value="/usr/local/bin/boocloud-bridge"),
+            patch(
+                "boocloud.bridge._find_local_bridge",
+                return_value="/usr/local/bin/boocloud-bridge",
+            ),
             patch("boocloud.bridge._run_bridge_local") as mock_local,
         ):
             from boocloud.bridge import _run_bridge
