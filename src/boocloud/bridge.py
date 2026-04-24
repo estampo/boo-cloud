@@ -144,9 +144,7 @@ def _run_bridge_docker(
             f"boocloud-bridge not found and Docker is not installed.\n{install_hint}"
         ) from None
     if docker_info.returncode != 0:
-        raise RuntimeError(
-            f"boocloud-bridge not found and Docker is not running.\n{install_hint}"
-        )
+        raise RuntimeError(f"boocloud-bridge not found and Docker is not running.\n{install_hint}")
 
     subprocess.run(
         ["docker", "pull", "--quiet", DOCKER_IMAGE],
