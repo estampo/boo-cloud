@@ -786,7 +786,11 @@ def _status_watch(
                 trays = parse_ams_trays(st)
             except Exception as e:
                 if use_daemon:
-                    use_daemon = False
+                    log.debug("Daemon query failed (%s), retrying", e)
+                    time.sleep(interval)
+                    use_daemon = _ensure_daemon(token_file, verbose=verbose)
+                    if not use_daemon:
+                        ui.console.print("[dim]Daemon lost — switched to poll mode[/dim]")
                     continue
                 ui.error(f"Query failed: {e}")
                 time.sleep(interval)
