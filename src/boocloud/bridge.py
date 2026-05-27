@@ -737,9 +737,10 @@ def cloud_print(
     verbose: bool = False,
     skip_ams_mapping: bool = False,
     ams_trays: list[dict] | None = None,
+    ams_mapping_override: list[int] | None = None,
 ) -> dict:
     """Send a 3MF to a Bambu printer via cloud bridge."""
-    if not skip_ams_mapping and not ams_trays:
+    if not skip_ams_mapping and not ams_trays and ams_mapping_override is None:
         daemon_result = _print_via_daemon(
             threemf_path,
             device_id,
@@ -763,6 +764,7 @@ def cloud_print(
             verbose=verbose,
             skip_ams_mapping=skip_ams_mapping,
             ams_trays=ams_trays or [],
+            ams_mapping_override=ams_mapping_override,
         )
     finally:
         try:
@@ -781,6 +783,7 @@ def _cloud_print_impl(
     verbose: bool,
     skip_ams_mapping: bool,
     ams_trays: list[dict],
+    ams_mapping_override: list[int] | None = None,
 ) -> dict:
     """Internal print implementation with an already-written token file."""
     args = [
@@ -796,7 +799,13 @@ def _cloud_print_impl(
     ]
 
     mapping: list[int] = []
-    if not skip_ams_mapping:
+    if ams_mapping_override is not None:
+        mapping = ams_mapping_override
+        mapping2 = [{"ams_id": s // 4, "slot_id": s % 4} for s in mapping]
+        args.extend(["--ams-mapping", json.dumps(mapping)])
+        args.extend(["--ams-mapping2", json.dumps(mapping2)])
+        log.info("AMS mapping override: %s", mapping)
+    elif not skip_ams_mapping:
         if not ams_trays:
             try:
                 status = query_status(device_id, token_file, verbose=verbose)
