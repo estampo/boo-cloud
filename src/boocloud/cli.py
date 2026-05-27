@@ -509,6 +509,14 @@ def print_cmd(
             "--ams-tray", metavar="SLOT:TYPE:COLOR", help="Manually specify AMS tray. Repeatable."
         ),
     ] = None,
+    ams_slot: Annotated[
+        Optional[list[int]],
+        typer.Option(
+            "--ams-slot",
+            metavar="N",
+            help="Force AMS slot (1-indexed). Repeatable for multi-filament.",
+        ),
+    ] = None,
     dry_run: Annotated[
         bool, typer.Option("-n", "--dry-run", help="Show print info without sending")
     ] = False,
@@ -537,6 +545,18 @@ def print_cmd(
 
     project_name = project or threemf.stem
 
+    if ams_slot and ams_tray:
+        ui.error("--ams-slot and --ams-tray cannot be used together")
+        sys.exit(1)
+
+    ams_mapping_override: list[int] | None = None
+    if ams_slot:
+        for s in ams_slot:
+            if s < 1:
+                ui.error(f"--ams-slot must be >= 1, got {s}")
+                sys.exit(1)
+        ams_mapping_override = [s - 1 for s in ams_slot]
+
     ams_trays: list[dict] = []
     for spec in ams_tray or []:
         parts = spec.split(":")
@@ -562,7 +582,9 @@ def print_cmd(
     _warn_if_bed_type_mismatch(threemf, configured_plate)
 
     if dry_run:
-        if not no_ams_mapping:
+        if ams_mapping_override is not None:
+            ui.info(f"AMS slot override: {[s + 1 for s in ams_mapping_override]}")
+        elif not no_ams_mapping:
             from boocloud.bridge import (
                 _build_ams_mapping,
                 _write_token_json,
@@ -593,7 +615,7 @@ def print_cmd(
         ui.info("Dry run — not sending to printer.")
         return
 
-    explicit_trays = bool(ams_trays)
+    explicit_trays = bool(ams_trays) or ams_mapping_override is not None
     if not no_ams_mapping and not yes and not explicit_trays:
         from boocloud.bridge import (
             _build_ams_mapping,
@@ -637,6 +659,7 @@ def print_cmd(
             verbose=_verbose,
             skip_ams_mapping=no_ams_mapping,
             ams_trays=ams_trays or None,
+            ams_mapping_override=ams_mapping_override,
         )
 
         ams_mapping = result.get("_ams_mapping")
