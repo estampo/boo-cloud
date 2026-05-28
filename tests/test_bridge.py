@@ -19,9 +19,11 @@ from boocloud.bridge import (
     _build_ams_mapping,
     _check_daemon_version,
     _cloud_print_impl,
+    _ensure_daemon,
     _find_local_bridge,
     _patch_config_3mf_colors,
     _run_bridge_local,
+    _shutdown_daemon,
     _start_daemon_docker,
     _stop_daemon_docker,
     _strip_gcode_from_3mf,
@@ -559,43 +561,87 @@ class TestQueryStatus:
         daemon.assert_called_once_with("DEV1")
         subprocess_bridge.assert_not_called()
 
-    def test_daemon_failure_restarts_and_retries(self, tmp_path):
-        """If the daemon fails, restart it and try once more before subprocess fallback."""
-        token = tmp_path / "token.json"
-        token.write_text("{}")
-        status = {"gcode_state": "RUNNING"}
-        with (
-            patch("boocloud.bridge._ensure_daemon", return_value=True),
-            patch(
-                "boocloud.bridge.query_status_daemon",
-                side_effect=[RuntimeError("stuck"), status],
-            ) as daemon,
-            patch("boocloud.bridge._restart_daemon", return_value=True) as restart,
-            patch("boocloud.bridge._run_bridge") as subprocess_bridge,
-        ):
-            result = query_status("DEV1", token)
-        assert result["gcode_state"] == "RUNNING"
-        assert daemon.call_count == 2
-        restart.assert_called_once()
-        subprocess_bridge.assert_not_called()
-
-    def test_daemon_failure_after_restart_falls_back_to_subprocess(self, tmp_path):
+    def test_daemon_failure_falls_back_to_subprocess(self, tmp_path):
+        """If the per-call ping passes but the daemon query then fails,
+        fall back to the subprocess path (don't retry — _ensure_daemon
+        validates health on every call already)."""
         token = tmp_path / "token.json"
         token.write_text("{}")
         status_json = json.dumps({"print": {"gcode_state": "IDLE"}})
         with (
             patch("boocloud.bridge._ensure_daemon", return_value=True),
-            patch(
-                "boocloud.bridge.query_status_daemon",
-                side_effect=[RuntimeError("first"), RuntimeError("still stuck")],
-            ),
-            patch("boocloud.bridge._restart_daemon", return_value=True),
+            patch("boocloud.bridge.query_status_daemon", side_effect=RuntimeError("boom")),
             patch("boocloud.bridge._run_bridge") as subprocess_bridge,
         ):
             subprocess_bridge.return_value = subprocess.CompletedProcess([], 0, status_json, "")
             result = query_status("DEV1", token)
         assert result["gcode_state"] == "IDLE"
         subprocess_bridge.assert_called_once()
+
+
+class TestEnsureDaemonHealth:
+    """``_ensure_daemon`` pings on every call and restarts a wedged daemon."""
+
+    def test_ping_ok_returns_immediately(self, tmp_path):
+        token = tmp_path / "token.json"
+        token.write_text("{}")
+        with (
+            patch("boocloud.bridge._daemon_ping", return_value=True),
+            patch("boocloud.bridge._check_daemon_version"),
+            patch("boocloud.bridge._shutdown_daemon") as shutdown,
+            patch("boocloud.bridge._start_daemon") as start,
+        ):
+            assert _ensure_daemon(token) is True
+        shutdown.assert_not_called()
+        start.assert_not_called()
+
+    def test_ping_fails_shuts_down_and_starts_fresh(self, tmp_path):
+        token = tmp_path / "token.json"
+        token.write_text("{}")
+        with (
+            patch("boocloud.bridge._daemon_ping", return_value=False),
+            patch("boocloud.bridge._check_daemon_version"),
+            patch("boocloud.bridge._shutdown_daemon", return_value=True) as shutdown,
+            patch("boocloud.bridge._start_daemon", return_value=True) as start,
+        ):
+            assert _ensure_daemon(token) is True
+        shutdown.assert_called_once()
+        start.assert_called_once()
+
+
+class TestShutdownDaemon:
+    """``_shutdown_daemon`` tries cooperative shutdown then force-kills."""
+
+    def test_cooperative_shutdown_succeeds(self):
+        with (
+            patch("urllib.request.urlopen"),
+            patch("boocloud.bridge._daemon_ping", return_value=False),
+            patch("boocloud.bridge._kill_local_daemon") as kill,
+        ):
+            assert _shutdown_daemon() is True
+        kill.assert_not_called()
+
+    def test_force_kill_when_cooperative_shutdown_fails(self):
+        # /shutdown succeeds at HTTP level but daemon stays up — wedged HTTP handler.
+        with (
+            patch("urllib.request.urlopen"),
+            patch(
+                "boocloud.bridge._daemon_ping",
+                # 4 polls after /shutdown all True, then 1st post-kill ping False
+                side_effect=[True, True, True, True, False],
+            ),
+            patch("boocloud.bridge._kill_local_daemon", return_value=True) as kill,
+        ):
+            assert _shutdown_daemon() is True
+        kill.assert_called_once()
+
+    def test_returns_false_when_daemon_refuses_to_die(self):
+        with (
+            patch("urllib.request.urlopen"),
+            patch("boocloud.bridge._daemon_ping", return_value=True),
+            patch("boocloud.bridge._kill_local_daemon", return_value=False),
+        ):
+            assert _shutdown_daemon() is False
 
 
 class TestCloudPrintImpl:
