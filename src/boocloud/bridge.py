@@ -34,6 +34,7 @@ def _xml_ns(root: ET.Element) -> str:
 DOCKER_IMAGE = "estampo/boocloud-bridge:bambu-02.05.00.00"
 EXPECTED_API_VERSION = 1
 _IS_MACOS = platform.system() == "Darwin"
+_IS_WINDOWS = platform.system() == "Windows"
 
 # ---------------------------------------------------------------------------
 # Credentials
@@ -429,14 +430,18 @@ def _pid_file_path() -> Path:
 
     Uses ``$XDG_RUNTIME_DIR`` when available (per-user, auto-cleared on
     logout); otherwise a per-user file in the system temp dir so two
-    users on the same host don't collide.
+    users on the same host don't collide. Falls back to a non-suffixed
+    file on platforms without ``os.getuid()`` (Windows), where the
+    daemon kill path is unused anyway (Windows goes through Docker).
     """
     runtime_dir = os.environ.get("XDG_RUNTIME_DIR")
     if runtime_dir:
         d = Path(runtime_dir)
         if d.is_dir():
             return d / "boocloud-bridge.pid"
-    return Path(tempfile.gettempdir()) / f"boocloud-bridge-{os.getuid()}.pid"
+    getuid = getattr(os, "getuid", None)
+    suffix = f"-{getuid()}" if getuid else ""
+    return Path(tempfile.gettempdir()) / f"boocloud-bridge{suffix}.pid"
 
 
 def _write_pid_file(pid: int) -> None:
@@ -628,25 +633,42 @@ def _kill_local_daemon() -> bool:
     Sends ``SIGTERM`` then ``SIGKILL`` after a 1s grace. Returns True
     if at least one process was killed, False if no PIDs found / no
     suitable mechanism available / permission denied for all targets.
+
+    Returns False immediately on Windows: the README documents that
+    Windows always uses Docker (no native daemon to kill), and
+    ``signal.SIGKILL`` / ``ProcessLookupError`` semantics differ enough
+    that the Unix code below is the wrong tool. The Docker container
+    is reaped by ``_stop_daemon_docker``.
     """
     import signal
     import time
 
+    if _IS_WINDOWS:
+        log.debug("Windows: no native daemon to kill (Docker path only)")
+        return False
+
     pids: list[int] = []
+
+    def _is_alive(pid: int) -> bool:
+        """Best-effort liveness check (signal 0). Treats any OSError other
+        than a ``no such process`` as "alive, no signal permission"."""
+        try:
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        except OSError:
+            return True
 
     # 1. PID file (preferred).
     recorded = _read_pid_file()
     if recorded is not None:
-        # Sanity check: is the PID still alive?
-        try:
-            os.kill(recorded, 0)
+        if _is_alive(recorded):
             pids.append(recorded)
-        except ProcessLookupError:
-            # Stale file — daemon already gone.
+        else:
             _clear_pid_file()
-        except PermissionError:
-            # Process exists but we can't signal it; record so the caller knows.
-            pids.append(recorded)
 
     # 2. pgrep fallback. Only useful when pgrep is installed and there
     #    might be a daemon we didn't start ourselves.
@@ -678,18 +700,25 @@ def _kill_local_daemon() -> bool:
             pass
         except PermissionError:
             log.warning("Insufficient permission to SIGTERM daemon pid %d", pid)
+        except OSError as e:
+            log.warning("SIGTERM to pid %d failed: %s", pid, e)
 
     time.sleep(1.0)
 
-    for pid in pids:
-        try:
-            os.kill(pid, 0)  # still alive?
-            os.kill(pid, signal.SIGKILL)
-            log.info("SIGKILL sent to wedged daemon pid %d", pid)
-        except ProcessLookupError:
-            pass
-        except PermissionError:
-            log.warning("Insufficient permission to SIGKILL daemon pid %d", pid)
+    sigkill = getattr(signal, "SIGKILL", None)
+    if sigkill is not None:
+        for pid in pids:
+            if not _is_alive(pid):
+                continue
+            try:
+                os.kill(pid, sigkill)
+                log.info("SIGKILL sent to wedged daemon pid %d", pid)
+            except ProcessLookupError:
+                pass
+            except PermissionError:
+                log.warning("Insufficient permission to SIGKILL daemon pid %d", pid)
+            except OSError as e:
+                log.warning("SIGKILL to pid %d failed: %s", pid, e)
 
     _clear_pid_file()
     return True

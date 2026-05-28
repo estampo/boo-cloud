@@ -6,6 +6,7 @@ import io
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import xml.etree.ElementTree as ET
 import zipfile
@@ -646,6 +647,10 @@ class TestShutdownDaemon:
             assert _shutdown_daemon() is False
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="native daemon kill path is Unix-only; Windows uses Docker (see README)",
+)
 class TestKillLocalDaemon:
     """``_kill_local_daemon`` finds the PID via PID-file then pgrep, then kills."""
 
@@ -737,8 +742,20 @@ class TestPidFilePath:
         from boocloud.bridge import _pid_file_path
 
         p = _pid_file_path()
-        assert p.name == f"boocloud-bridge-{os.getuid()}.pid"
+        getuid = getattr(os, "getuid", None)
+        expected = f"boocloud-bridge-{getuid()}.pid" if getuid else "boocloud-bridge.pid"
+        assert p.name == expected
         # Should be in a known temp dir, not / or cwd
+        assert str(p).startswith(tempfile.gettempdir())
+
+    def test_falls_back_to_temp_without_getuid(self, monkeypatch):
+        """Windows has no ``os.getuid`` — path drops the per-user suffix."""
+        monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+        monkeypatch.delattr(os, "getuid", raising=False)
+        from boocloud.bridge import _pid_file_path
+
+        p = _pid_file_path()
+        assert p.name == "boocloud-bridge.pid"
         assert str(p).startswith(tempfile.gettempdir())
 
 
