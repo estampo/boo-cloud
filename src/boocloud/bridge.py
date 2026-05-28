@@ -558,12 +558,117 @@ def _stop_daemon_docker() -> None:
         pass
 
 
+def _kill_local_daemon() -> bool:
+    """Forcefully terminate any local ``boocloud-bridge daemon`` process.
+
+    Used as a fallback when ``POST /shutdown`` fails to bring the daemon
+    down — typical when the daemon is wedged inside libbambu FFI and the
+    HTTP handler is blocked. Looks up PIDs with ``pgrep`` and sends
+    ``SIGTERM`` then ``SIGKILL`` after a 1s grace. Returns True if at
+    least one process was killed.
+    """
+    import signal
+    import time
+
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", r"boocloud-bridge.*\bdaemon\b"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (subprocess.SubprocessError, FileNotFoundError):
+        log.debug("pgrep unavailable; cannot force-kill daemon", exc_info=True)
+        return False
+
+    pids: list[int] = []
+    for line in result.stdout.split():
+        line = line.strip()
+        if line.isdigit():
+            pid = int(line)
+            if pid != os.getpid():
+                pids.append(pid)
+    if not pids:
+        return False
+
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        except PermissionError:
+            log.warning("Insufficient permission to SIGTERM daemon pid %d", pid)
+
+    time.sleep(1.0)
+
+    for pid in pids:
+        try:
+            os.kill(pid, 0)  # still alive?
+            os.kill(pid, signal.SIGKILL)
+            log.info("SIGKILL sent to wedged daemon pid %d", pid)
+        except ProcessLookupError:
+            pass
+        except PermissionError:
+            log.warning("Insufficient permission to SIGKILL daemon pid %d", pid)
+
+    return True
+
+
+def _shutdown_daemon() -> bool:
+    """Stop any running daemon, cooperatively if possible, forcefully otherwise.
+
+    Tries ``POST /shutdown`` first (a wedged daemon may still process this
+    if only MQTT is stuck, not the HTTP handler). If ``/ping`` still
+    succeeds after a short wait, falls back to ``_kill_local_daemon``.
+    Returns True once ``/ping`` stops responding, False if all attempts
+    fail (e.g., remote/Docker daemon we can't pgrep, or insufficient
+    privileges).
+    """
+    import time
+    import urllib.request
+
+    try:
+        req = urllib.request.Request(f"{DAEMON_URL}/shutdown", method="POST")
+        with urllib.request.urlopen(req, timeout=2):
+            pass
+    except Exception:
+        log.debug("Daemon /shutdown request errored", exc_info=True)
+        # The daemon may have already been down, or wedged. Continue.
+
+    # Give cooperative shutdown ~1s to take effect.
+    for _ in range(4):
+        if not _daemon_ping():
+            return True
+        time.sleep(0.25)
+
+    # Still responding → wedged or shutdown route stuck. Force-kill.
+    log.info("Daemon did not exit after /shutdown; force-killing")
+    _kill_local_daemon()
+
+    for _ in range(16):
+        if not _daemon_ping():
+            return True
+        time.sleep(0.25)
+    log.warning("Daemon still responding after force-kill attempt")
+    return False
+
+
 def _ensure_daemon(token_file: Path, *, verbose: bool = False) -> bool:
-    """Ensure a daemon is running.  Returns True if available."""
+    """Ensure a *healthy* daemon is running.  Returns True if available.
+
+    Pings on every call: a healthy daemon replies in milliseconds, so a
+    slow ping (or no ping) means the daemon is wedged or absent. In
+    either case we shut it down (cooperatively, or force-killed if the
+    HTTP handler is stuck) and start a fresh one — both paths are
+    no-ops when nothing is actually running, so this is cheap when the
+    daemon is healthy and self-healing when it isn't.
+    """
     if _daemon_ping():
         _check_daemon_version()
         return True
-    log.info("No daemon running, starting one...")
+
+    log.info("Daemon not responsive, restarting...")
+    _shutdown_daemon()
     if _start_daemon(token_file, verbose=verbose):
         _check_daemon_version()
         return True
@@ -595,7 +700,22 @@ def query_status(
     *,
     verbose: bool = False,
 ) -> dict:
-    """Query live printer status via the bridge."""
+    """Query live printer status via the bridge.
+
+    Prefers the persistent HTTP daemon (auto-starting it if necessary) so
+    repeat calls take milliseconds instead of seconds — each fresh
+    ``boocloud-bridge status`` subprocess otherwise re-authenticates to
+    Bambu Cloud and reconnects MQTT (~30s+ per call). ``_ensure_daemon``
+    pings on every call and force-restarts a wedged daemon before we
+    use it, so the daemon failing during the query itself is rare;
+    when it does fail anyway, we fall back to the subprocess path.
+    """
+    if _ensure_daemon(token_file, verbose=verbose):
+        try:
+            return query_status_daemon(device_id)
+        except RuntimeError as e:
+            log.warning("daemon status query failed, falling back to subprocess: %s", e)
+
     result = _run_bridge(
         ["-c", str(token_file.resolve()), "status", device_id],
         timeout=120,
