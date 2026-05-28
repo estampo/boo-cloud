@@ -1,1 +1,0 @@
-Decouple tag/release/bridge-binary publishing from the TestPyPI dry-run gate, so a misconfigured trusted-publishing setup no longer blocks the entire release pipeline. The dry-run gate now only blocks `publish-pypi`, where it protects the PyPI channel as intended.
