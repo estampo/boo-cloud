@@ -1,0 +1,1 @@
+Replace `git add changes/` with `git commit -am` in the prepare-release workflow — towncrier removes the `changes/` directory itself once all fragments are consumed, so any pathspec on it errors out.
