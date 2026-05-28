@@ -514,7 +514,10 @@ class TestQueryStatus:
         token = tmp_path / "token.json"
         token.write_text("{}")
         status_json = json.dumps({"print": {"mc_percent": 50, "gcode_state": "RUNNING"}})
-        with patch("boocloud.bridge._run_bridge") as mock_bridge:
+        with (
+            patch("boocloud.bridge._ensure_daemon", return_value=False),
+            patch("boocloud.bridge._run_bridge") as mock_bridge,
+        ):
             mock_bridge.return_value = subprocess.CompletedProcess([], 0, status_json, "")
             result = query_status("DEV1", token)
             assert result["mc_percent"] == 50
@@ -523,7 +526,10 @@ class TestQueryStatus:
         token = tmp_path / "token.json"
         token.write_text("{}")
         status_json = json.dumps({"gcode_state": "IDLE"})
-        with patch("boocloud.bridge._run_bridge") as mock_bridge:
+        with (
+            patch("boocloud.bridge._ensure_daemon", return_value=False),
+            patch("boocloud.bridge._run_bridge") as mock_bridge,
+        ):
             mock_bridge.return_value = subprocess.CompletedProcess([], 0, status_json, "")
             result = query_status("DEV1", token)
             assert result["gcode_state"] == "IDLE"
@@ -531,10 +537,65 @@ class TestQueryStatus:
     def test_non_json_raises(self, tmp_path):
         token = tmp_path / "token.json"
         token.write_text("{}")
-        with patch("boocloud.bridge._run_bridge") as mock_bridge:
+        with (
+            patch("boocloud.bridge._ensure_daemon", return_value=False),
+            patch("boocloud.bridge._run_bridge") as mock_bridge,
+        ):
             mock_bridge.return_value = subprocess.CompletedProcess([], 1, "error text", "fail")
             with pytest.raises(RuntimeError, match="Bridge returned non-JSON"):
                 query_status("DEV1", token)
+
+    def test_uses_daemon_when_available(self, tmp_path):
+        token = tmp_path / "token.json"
+        token.write_text("{}")
+        status = {"mc_percent": 42, "gcode_state": "RUNNING"}
+        with (
+            patch("boocloud.bridge._ensure_daemon", return_value=True),
+            patch("boocloud.bridge.query_status_daemon", return_value=status) as daemon,
+            patch("boocloud.bridge._run_bridge") as subprocess_bridge,
+        ):
+            result = query_status("DEV1", token)
+        assert result["mc_percent"] == 42
+        daemon.assert_called_once_with("DEV1")
+        subprocess_bridge.assert_not_called()
+
+    def test_daemon_failure_restarts_and_retries(self, tmp_path):
+        """If the daemon fails, restart it and try once more before subprocess fallback."""
+        token = tmp_path / "token.json"
+        token.write_text("{}")
+        status = {"gcode_state": "RUNNING"}
+        with (
+            patch("boocloud.bridge._ensure_daemon", return_value=True),
+            patch(
+                "boocloud.bridge.query_status_daemon",
+                side_effect=[RuntimeError("stuck"), status],
+            ) as daemon,
+            patch("boocloud.bridge._restart_daemon", return_value=True) as restart,
+            patch("boocloud.bridge._run_bridge") as subprocess_bridge,
+        ):
+            result = query_status("DEV1", token)
+        assert result["gcode_state"] == "RUNNING"
+        assert daemon.call_count == 2
+        restart.assert_called_once()
+        subprocess_bridge.assert_not_called()
+
+    def test_daemon_failure_after_restart_falls_back_to_subprocess(self, tmp_path):
+        token = tmp_path / "token.json"
+        token.write_text("{}")
+        status_json = json.dumps({"print": {"gcode_state": "IDLE"}})
+        with (
+            patch("boocloud.bridge._ensure_daemon", return_value=True),
+            patch(
+                "boocloud.bridge.query_status_daemon",
+                side_effect=[RuntimeError("first"), RuntimeError("still stuck")],
+            ),
+            patch("boocloud.bridge._restart_daemon", return_value=True),
+            patch("boocloud.bridge._run_bridge") as subprocess_bridge,
+        ):
+            subprocess_bridge.return_value = subprocess.CompletedProcess([], 0, status_json, "")
+            result = query_status("DEV1", token)
+        assert result["gcode_state"] == "IDLE"
+        subprocess_bridge.assert_called_once()
 
 
 class TestCloudPrintImpl:

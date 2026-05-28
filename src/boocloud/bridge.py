@@ -570,6 +570,46 @@ def _ensure_daemon(token_file: Path, *, verbose: bool = False) -> bool:
     return False
 
 
+def _shutdown_daemon() -> bool:
+    """Ask the running daemon to exit via POST /shutdown.
+
+    Best effort — returns True if /ping starts failing within ~5s of the
+    shutdown request, meaning the process really exited and a fresh one
+    can be started by ``_start_daemon`` on the next ``_ensure_daemon``
+    call. If the shutdown endpoint hangs (e.g., daemon wedged inside
+    libbambu FFI), give up so the caller can fall back to the subprocess
+    path rather than block forever.
+    """
+    import time
+    import urllib.request
+
+    try:
+        req = urllib.request.Request(f"{DAEMON_URL}/shutdown", method="POST")
+        with urllib.request.urlopen(req, timeout=2):
+            pass
+    except Exception:
+        log.debug("Daemon /shutdown request errored", exc_info=True)
+        # Still wait below — the daemon may have exited mid-response.
+
+    for _ in range(20):
+        if not _daemon_ping():
+            return True
+        time.sleep(0.25)
+    log.warning("Daemon did not exit after /shutdown request")
+    return False
+
+
+def _restart_daemon(token_file: Path, *, verbose: bool = False) -> bool:
+    """Shut down any running daemon and start a fresh one.
+
+    Use this when the daemon has gotten stuck (e.g., MQTT-disconnected,
+    libbambu lock contention) and a clean restart is more reliable than
+    waiting for it to recover.
+    """
+    _shutdown_daemon()
+    return _ensure_daemon(token_file, verbose=verbose)
+
+
 def query_status_daemon(device_id: str) -> dict:
     """Query printer status via the HTTP daemon (fast, uses cached MQTT data)."""
     import urllib.request
@@ -595,7 +635,29 @@ def query_status(
     *,
     verbose: bool = False,
 ) -> dict:
-    """Query live printer status via the bridge."""
+    """Query live printer status via the bridge.
+
+    Prefers the persistent HTTP daemon (auto-starting it if necessary) so
+    repeat calls take milliseconds instead of seconds — each fresh
+    ``boocloud-bridge status`` subprocess otherwise re-authenticates to
+    Bambu Cloud and reconnects MQTT (~30s+ per call). If the daemon
+    fails (e.g., wedged from a stale MQTT session), shuts it down and
+    starts a fresh one once before falling back to the subprocess path.
+    """
+    if _ensure_daemon(token_file, verbose=verbose):
+        try:
+            return query_status_daemon(device_id)
+        except RuntimeError as e:
+            log.warning("daemon status query failed, restarting daemon: %s", e)
+            if _restart_daemon(token_file, verbose=verbose):
+                try:
+                    return query_status_daemon(device_id)
+                except RuntimeError as e2:
+                    log.warning(
+                        "daemon status query failed after restart, falling back to subprocess: %s",
+                        e2,
+                    )
+
     result = _run_bridge(
         ["-c", str(token_file.resolve()), "status", device_id],
         timeout=120,

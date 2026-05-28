@@ -1,0 +1,1 @@
+``query_status`` now routes through the persistent HTTP daemon (auto-starting it if necessary), bringing repeat status polls down from ~30s+ to milliseconds. If the daemon fails (e.g., wedged from a stale MQTT session), it is shut down via ``POST /shutdown`` and restarted once before falling back to the subprocess path.
