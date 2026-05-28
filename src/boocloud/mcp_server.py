@@ -250,6 +250,37 @@ def start_print(
 
     ``skip_ams=True`` forces a print without AMS mapping (e.g., single-color
     external spool on an AMS-equipped printer).
+
+    On a successful submit the response looks like::
+
+        {
+          "result": "sent",
+          "bridge_response": {
+            "result": "sent",
+            "return_code": -1,
+            "print_result": -999,
+            ...
+          },
+          ...
+        }
+
+    The numeric fields are reported by Bambu's proprietary networking
+    library and have no published API documentation. The values above
+    look like errors but mean the opposite — ``result: "sent"`` is the
+    authoritative success signal. Specifically:
+
+    - ``return_code: -1`` is the bridge's internal sentinel for "queued
+      and submitted to Bambu Cloud" — distinct from ``0`` ("acknowledged
+      as started") and any other value ("error"). Treat ``"sent"`` and
+      ``"success"`` as both successful submits.
+    - ``print_result: -999`` is the default sentinel value used before
+      the printer's start-print callback fires. With ``return_code: -1``
+      it is normal and expected — the printer hasn't acknowledged yet.
+
+    Once submitted, call ``get_status`` to watch ``gcode_state``,
+    ``mc_percent``, and ``task`` reflect the new job. ``cancel`` is
+    disabled upstream by Bambu's signing gate, so a submitted print must
+    be stopped from the printer's screen or the Bambu app.
     """
     path = Path(file_path)
     if not path.exists():
