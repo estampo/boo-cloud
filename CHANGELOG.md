@@ -1,3 +1,15 @@
+## 0.2.1 — 2026-05-28
+
+### Bugfixes
+
+- Decouple tag/release/bridge-binary publishing from the TestPyPI dry-run gate, so a misconfigured trusted-publishing setup no longer blocks the entire release pipeline. The dry-run gate now only blocks `publish-pypi`, where it protects the PyPI channel as intended. ([#decouple-release-from-testpypi](https://github.com/estampo/boo-cloud/pull/decouple-release-from-testpypi))
+- ``query_status`` now routes through the persistent HTTP daemon (auto-starting it if necessary), bringing repeat status polls down from ~30s+ to milliseconds. ``_ensure_daemon`` pings on every call: a healthy daemon replies in milliseconds, so a slow or failing ping means the daemon is wedged or absent and we shut it down (cooperatively via ``POST /shutdown``, falling back to ``SIGTERM``/``SIGKILL`` on the PID via ``pgrep`` if the HTTP handler is stuck) and start a fresh one before using it. ([#query-status-via-daemon](https://github.com/estampo/boo-cloud/pull/query-status-via-daemon))
+
+### Misc
+
+- Add ``docs/llm-integration.md`` documenting boo-cloud quirks an LLM (or LLM-driven workflow) is most likely to be confused by — notably that ``start_print`` returns ``result: "sent"`` with ``return_code: -1`` and ``print_result: -999`` as the **success** path, not an error. Also expand the ``start_print`` MCP docstring with the same explanation so it surfaces in the tool description. ([#llm-integration-docs](https://github.com/estampo/boo-cloud/pull/llm-integration-docs))
+
+
 ## 0.2.0 — 2026-05-28
 
 ### Features
