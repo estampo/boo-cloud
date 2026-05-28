@@ -63,6 +63,16 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG=${GITHUB_REF#refs/tags/}
+          # Ensure the release exists. When this workflow is the first to
+          # touch the tag (manual dispatch on a tag ref, or a release.yml
+          # branch where github-release hasn't run yet), create a minimal
+          # release so `gh release upload` has somewhere to attach assets.
+          if ! gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --repo "${{ github.repository }}" \
+              --title "$TAG" \
+              --notes "Bridge binaries for $TAG."
+          fi
           for dir in dist/boocloud-bridge-*; do
             name=$(basename "$dir")
             cp "$dir/boocloud-bridge" "/tmp/$name"

@@ -153,13 +153,17 @@ jobs:
           repository-url: https://test.pypi.org/legacy/
           skip-existing: true
 
-  # ── Create tag only after TestPyPI succeeds ─────────────────────────
+  # ── Create tag once the package builds cleanly ──────────────────────
+  # Not gated on dry-run-publish: the tag/release represents "we're shipping
+  # this version" and is independent of the PyPI delivery channel (a TestPyPI
+  # outage or trusted-publishing misconfig must not block bridge releases).
+  # publish-pypi keeps the dry-run gate to protect the PyPI channel itself.
   create-tag:
-    needs: [version, detect-release, dry-run-publish]
+    needs: [version, detect-release, build-pypi]
     if: |
       always() &&
       needs.version.result == 'success' &&
-      needs.dry-run-publish.result == 'success'
+      needs.build-pypi.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -182,12 +186,13 @@ jobs:
           fi
 
   # ── Create GitHub Release ───────────────────────────────────────────
+  # Not gated on dry-run-publish (see create-tag comment).
   github-release:
-    needs: [version, create-tag, dry-run-publish]
+    needs: [version, create-tag, build-pypi]
     if: |
       always() &&
       needs.version.result == 'success' &&
-      needs.dry-run-publish.result == 'success' &&
+      needs.build-pypi.result == 'success' &&
       (needs.create-tag.result == 'success' || needs.create-tag.result == 'skipped')
     runs-on: ubuntu-latest
     permissions:
@@ -233,12 +238,15 @@ jobs:
           fi
 
   # ── Publish to PyPI ─────────────────────────────────────────────────
+  # Gated on dry-run-publish so the TestPyPI safety check still protects
+  # the PyPI channel (tag/release/bridge are independent — see create-tag).
   publish-pypi:
-    needs: [version, github-release]
+    needs: [version, github-release, dry-run-publish]
     if: |
       always() &&
       needs.version.result == 'success' &&
-      needs.github-release.result == 'success'
+      needs.github-release.result == 'success' &&
+      needs.dry-run-publish.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       id-token: write
@@ -254,12 +262,15 @@ jobs:
           skip-existing: true
 
   # ── Trigger bridge binary build ─────────────────────────────────────
+  # Waits on github-release so build-bridge.yml's release-assets job has a
+  # release to upload to (avoids a race between the two upload paths).
   build-bridge:
-    needs: [version, create-tag]
+    needs: [version, create-tag, github-release]
     if: |
       always() &&
       needs.version.result == 'success' &&
-      needs.create-tag.result == 'success'
+      needs.create-tag.result == 'success' &&
+      needs.github-release.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - name: Trigger bridge build
