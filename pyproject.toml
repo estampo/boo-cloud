@@ -33,9 +33,14 @@ dev = [
     "mypy>=1.10.0",
     "towncrier>=24.7.0",
 ]
+mcp = [
+    "mcp>=1.0",
+    "bambox>=0.6",
+]
 
 [project.scripts]
 boocloud = "boocloud.cli:main"
+boocloud-mcp = "boocloud.mcp_server:main"
 
 [tool.ruff]
 target-version = "py311"

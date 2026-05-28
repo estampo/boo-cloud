@@ -188,6 +188,46 @@ Options (for `start`):
 | `-V, --version` | Show installed version |
 | `-v, --verbose` | Enable debug logging |
 
+## MCP server
+
+`boocloud-mcp` exposes status queries and print submission as MCP tools, so
+an LLM (Claude Desktop, Claude Code, etc.) can drive the printer. Install
+with the `mcp` extra:
+
+```bash
+pip install 'boo-cloud[mcp]'
+```
+
+Tools:
+
+| Tool | Purpose |
+|------|---------|
+| `list_printers` | Names + masked serials from `credentials.toml` |
+| `get_status` | Live state, temps, progress, ETA, **AMS trays** |
+| `get_print_info` | Filaments, time, weight, layers, bed_type from a `.gcode.3mf` |
+| `validate_3mf` | Safety validation via `bambox.validate` |
+| `start_print` | Validate + AMS mapping + cloud submit (gated by `confirm`) |
+
+Safety: `start_print` runs bambox validation first (refuses on errors).
+If the printer has loaded AMS trays it **requires** explicit
+`ams_slots=[...]` (1-indexed, one per filament in the 3MF) — there is no
+heuristic auto-mapping in the MCP path. `confirm=true` is required to
+actually submit; otherwise the tool returns the planned mapping for review.
+
+Claude Code / Claude Desktop config snippet:
+
+```json
+{
+  "mcpServers": {
+    "boo-cloud": {
+      "command": "boocloud-mcp"
+    }
+  }
+}
+```
+
+Run `boocloud login` first so the server can read `credentials.toml`.
+
 ## Python API
 
 ```python
