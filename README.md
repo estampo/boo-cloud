@@ -269,6 +269,7 @@ for the decision record.
 
 | Document | Contents |
 |----------|---------|
+| [`docs/llm-integration.md`](docs/llm-integration.md) | Quirks to know when calling boo-cloud from an LLM-driven workflow |
 | [`docs/cloud-print-research.md`](docs/cloud-print-research.md) | Bambu Cloud REST API, MQTT protocol, X.509 signing |
 | [`docs/signed-app-gate.md`](docs/signed-app-gate.md) | Why `cancel` is disabled; libbambu signing gate |
 | [`docs/sdk-send-message-investigation.md`](docs/sdk-send-message-investigation.md) | send_message -2 investigation |
