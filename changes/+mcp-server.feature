@@ -1,1 +1,0 @@
-Add `boocloud-mcp` MCP server (stdio) exposing `list_printers`, `get_status`, `get_print_info`, `validate_3mf`, and `start_print` tools so an LLM (Claude Desktop, Claude Code, etc.) can query printer state and submit print jobs. `start_print` requires explicit `ams_slots` when an AMS is loaded and gates submission behind `confirm=true`. Install via `pip install 'boo-cloud[mcp]'`.

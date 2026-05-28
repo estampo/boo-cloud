@@ -1,1 +1,0 @@
-Fix `prepare-release` workflow to stage fragment deletions with `git add -A changes/`; previously the commit step failed once all fragments were consumed.
