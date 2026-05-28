@@ -18,7 +18,7 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
-      - run: uv sync --extra dev
+      - run: uv sync --extra dev --extra mcp
       - run: uv run ruff check src tests
       - run: uv run ruff format --check src tests
       - run: uv run mypy src/boocloud
@@ -48,7 +48,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           enable-cache: true
-      - run: uv sync --extra dev
+      - run: uv sync --extra dev --extra mcp
       - run: uv run pytest -v
 
   coverage:
@@ -59,7 +59,7 @@ jobs:
         with:
           python-version: "3.13"
           enable-cache: true
-      - run: uv sync --extra dev
+      - run: uv sync --extra dev --extra mcp
       - run: uv run pytest --cov=boocloud --cov-report=xml -v
       - uses: codecov/codecov-action@v5
         with:
