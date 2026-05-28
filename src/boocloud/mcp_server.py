@@ -23,22 +23,13 @@ Safety properties enforced here, not in the bridge:
 
 from __future__ import annotations
 
-import sys
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-try:
-    from bambox import extract_print_info
-    from bambox.validate import validate_3mf as _bambox_validate
-    from mcp.server.fastmcp import FastMCP
-except ImportError as exc:  # pragma: no cover - import-time guard
-    missing = exc.name or "mcp/bambox"
-    sys.stderr.write(
-        f"boocloud-mcp requires the 'mcp' extra (missing: {missing}).\n"
-        "Install with:  pip install 'boo-cloud[mcp]'\n"
-    )
-    sys.exit(1)
+from bambox import extract_print_info
+from bambox.validate import validate_3mf as _bambox_validate
+from mcp.server.fastmcp import FastMCP
 
 from boocloud import credentials as _creds
 from boocloud.bridge import (
