@@ -34,6 +34,7 @@ def _xml_ns(root: ET.Element) -> str:
 DOCKER_IMAGE = "estampo/boocloud-bridge:bambu-02.05.00.00"
 EXPECTED_API_VERSION = 1
 _IS_MACOS = platform.system() == "Darwin"
+_IS_WINDOWS = platform.system() == "Windows"
 
 # ---------------------------------------------------------------------------
 # Credentials
@@ -424,6 +425,56 @@ def _patch_config_3mf_colors(
 DAEMON_URL = "http://127.0.0.1:8765"
 
 
+def _pid_file_path() -> Path:
+    """Return the path where ``_start_daemon`` records the spawned PID.
+
+    Uses ``$XDG_RUNTIME_DIR`` when available (per-user, auto-cleared on
+    logout); otherwise a per-user file in the system temp dir so two
+    users on the same host don't collide. Falls back to a non-suffixed
+    file on platforms without ``os.getuid()`` (Windows), where the
+    daemon kill path is unused anyway (Windows goes through Docker).
+    """
+    runtime_dir = os.environ.get("XDG_RUNTIME_DIR")
+    if runtime_dir:
+        d = Path(runtime_dir)
+        if d.is_dir():
+            return d / "boocloud-bridge.pid"
+    getuid = getattr(os, "getuid", None)
+    suffix = f"-{getuid()}" if getuid else ""
+    return Path(tempfile.gettempdir()) / f"boocloud-bridge{suffix}.pid"
+
+
+def _write_pid_file(pid: int) -> None:
+    """Best-effort PID-file write; failures are logged but non-fatal."""
+    try:
+        path = _pid_file_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"{pid}\n")
+    except OSError as e:
+        log.debug("Failed to write daemon PID file: %s", e)
+
+
+def _read_pid_file() -> int | None:
+    """Read the recorded daemon PID, or None if the file is missing or invalid."""
+    try:
+        text = _pid_file_path().read_text().strip()
+    except (FileNotFoundError, OSError):
+        return None
+    try:
+        pid = int(text)
+    except ValueError:
+        return None
+    return pid if pid > 1 else None
+
+
+def _clear_pid_file() -> None:
+    """Delete the daemon PID file if present; ignore errors."""
+    try:
+        _pid_file_path().unlink()
+    except (FileNotFoundError, OSError):
+        pass
+
+
 def _daemon_ping() -> bool:
     """Return True if a bridge daemon is responding on localhost:8765."""
     import urllib.request
@@ -470,7 +521,13 @@ def _check_daemon_version() -> None:
 
 
 def _start_daemon(token_file: Path, *, verbose: bool = False) -> bool:
-    """Start the bridge daemon in the background.  Returns True if started."""
+    """Start the bridge daemon in the background.  Returns True if started.
+
+    Records the spawned PID in ``_pid_file_path()`` so ``_kill_local_daemon``
+    can target this exact process without depending on ``pgrep``. The Docker
+    branch skips the PID file (the container is the unit of life and is
+    managed by ``_start_daemon_docker`` / ``_stop_daemon_docker``).
+    """
     binary = _find_local_bridge()
     if binary:
         cmd = [binary]
@@ -478,12 +535,13 @@ def _start_daemon(token_file: Path, *, verbose: bool = False) -> bool:
             cmd.append("-v")
         cmd.extend(["-c", str(token_file.resolve()), "daemon", "--port", "8765"])
         log.debug("Starting daemon: %s", " ".join(cmd))
-        subprocess.Popen(
+        proc = subprocess.Popen(
             cmd,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
+        _write_pid_file(proc.pid)
     else:
         if not _start_daemon_docker(token_file, verbose=verbose):
             return False
@@ -563,13 +621,57 @@ def _kill_local_daemon() -> bool:
 
     Used as a fallback when ``POST /shutdown`` fails to bring the daemon
     down — typical when the daemon is wedged inside libbambu FFI and the
-    HTTP handler is blocked. Looks up PIDs with ``pgrep`` and sends
-    ``SIGTERM`` then ``SIGKILL`` after a 1s grace. Returns True if at
-    least one process was killed.
+    HTTP handler is blocked.
+
+    PID discovery has two paths:
+    1. The PID file written by ``_start_daemon`` (preferred — works on
+       any image, no extra package required).
+    2. ``pgrep -f boocloud-bridge.*\\bdaemon\\b`` (fallback — covers
+       daemons started outside this Python process, e.g., via
+       ``boocloud daemon`` CLI).
+
+    Sends ``SIGTERM`` then ``SIGKILL`` after a 1s grace. Returns True
+    if at least one process was killed, False if no PIDs found / no
+    suitable mechanism available / permission denied for all targets.
+
+    Returns False immediately on Windows: the README documents that
+    Windows always uses Docker (no native daemon to kill), and
+    ``signal.SIGKILL`` / ``ProcessLookupError`` semantics differ enough
+    that the Unix code below is the wrong tool. The Docker container
+    is reaped by ``_stop_daemon_docker``.
     """
     import signal
     import time
 
+    if _IS_WINDOWS:
+        log.debug("Windows: no native daemon to kill (Docker path only)")
+        return False
+
+    pids: list[int] = []
+
+    def _is_alive(pid: int) -> bool:
+        """Best-effort liveness check (signal 0). Treats any OSError other
+        than a ``no such process`` as "alive, no signal permission"."""
+        try:
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        except OSError:
+            return True
+
+    # 1. PID file (preferred).
+    recorded = _read_pid_file()
+    if recorded is not None:
+        if _is_alive(recorded):
+            pids.append(recorded)
+        else:
+            _clear_pid_file()
+
+    # 2. pgrep fallback. Only useful when pgrep is installed and there
+    #    might be a daemon we didn't start ourselves.
     try:
         result = subprocess.run(
             ["pgrep", "-f", r"boocloud-bridge.*\bdaemon\b"],
@@ -577,17 +679,17 @@ def _kill_local_daemon() -> bool:
             text=True,
             timeout=5,
         )
-    except (subprocess.SubprocessError, FileNotFoundError):
-        log.debug("pgrep unavailable; cannot force-kill daemon", exc_info=True)
-        return False
-
-    pids: list[int] = []
-    for line in result.stdout.split():
-        line = line.strip()
-        if line.isdigit():
+        for line in result.stdout.split():
+            line = line.strip()
+            if not line.isdigit():
+                continue
             pid = int(line)
-            if pid != os.getpid():
-                pids.append(pid)
+            if pid == os.getpid() or pid in pids:
+                continue
+            pids.append(pid)
+    except (subprocess.SubprocessError, FileNotFoundError):
+        log.debug("pgrep unavailable; relying on PID file only", exc_info=True)
+
     if not pids:
         return False
 
@@ -598,19 +700,27 @@ def _kill_local_daemon() -> bool:
             pass
         except PermissionError:
             log.warning("Insufficient permission to SIGTERM daemon pid %d", pid)
+        except OSError as e:
+            log.warning("SIGTERM to pid %d failed: %s", pid, e)
 
     time.sleep(1.0)
 
-    for pid in pids:
-        try:
-            os.kill(pid, 0)  # still alive?
-            os.kill(pid, signal.SIGKILL)
-            log.info("SIGKILL sent to wedged daemon pid %d", pid)
-        except ProcessLookupError:
-            pass
-        except PermissionError:
-            log.warning("Insufficient permission to SIGKILL daemon pid %d", pid)
+    sigkill = getattr(signal, "SIGKILL", None)
+    if sigkill is not None:
+        for pid in pids:
+            if not _is_alive(pid):
+                continue
+            try:
+                os.kill(pid, sigkill)
+                log.info("SIGKILL sent to wedged daemon pid %d", pid)
+            except ProcessLookupError:
+                pass
+            except PermissionError:
+                log.warning("Insufficient permission to SIGKILL daemon pid %d", pid)
+            except OSError as e:
+                log.warning("SIGKILL to pid %d failed: %s", pid, e)
 
+    _clear_pid_file()
     return True
 
 

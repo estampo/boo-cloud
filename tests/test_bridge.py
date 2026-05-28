@@ -6,6 +6,8 @@ import io
 import json
 import os
 import subprocess
+import sys
+import tempfile
 import xml.etree.ElementTree as ET
 import zipfile
 from unittest.mock import patch
@@ -21,6 +23,7 @@ from boocloud.bridge import (
     _cloud_print_impl,
     _ensure_daemon,
     _find_local_bridge,
+    _kill_local_daemon,
     _patch_config_3mf_colors,
     _run_bridge_local,
     _shutdown_daemon,
@@ -642,6 +645,118 @@ class TestShutdownDaemon:
             patch("boocloud.bridge._kill_local_daemon", return_value=False),
         ):
             assert _shutdown_daemon() is False
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="native daemon kill path is Unix-only; Windows uses Docker (see README)",
+)
+class TestKillLocalDaemon:
+    """``_kill_local_daemon`` finds the PID via PID-file then pgrep, then kills."""
+
+    def test_uses_pid_file_when_present(self, tmp_path, monkeypatch):
+        # Spawn a long-lived dummy process to act as the "daemon"
+        proc = subprocess.Popen(["sleep", "60"])
+        try:
+            pid_file = tmp_path / "bridge.pid"
+            pid_file.write_text(f"{proc.pid}\n")
+            monkeypatch.setattr("boocloud.bridge._pid_file_path", lambda: pid_file)
+            # No pgrep needed — and we don't want it picking up the test runner
+            with patch(
+                "boocloud.bridge.subprocess.run",
+                side_effect=FileNotFoundError,
+            ):
+                assert _kill_local_daemon() is True
+            proc.wait(timeout=5)
+            assert not pid_file.exists()  # cleaned up after kill
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+
+    def test_stale_pid_file_is_cleared(self, tmp_path, monkeypatch):
+        # 99999 is almost certainly not a live PID
+        pid_file = tmp_path / "bridge.pid"
+        pid_file.write_text("99999\n")
+        monkeypatch.setattr("boocloud.bridge._pid_file_path", lambda: pid_file)
+        with patch(
+            "boocloud.bridge.subprocess.run",
+            side_effect=FileNotFoundError,
+        ):
+            # No pgrep, no live PID — nothing to kill.
+            assert _kill_local_daemon() is False
+        # Stale file was removed during the sanity check.
+        assert not pid_file.exists()
+
+    def test_falls_back_to_pgrep_when_no_pid_file(self, tmp_path, monkeypatch):
+        proc = subprocess.Popen(["sleep", "60"])
+        try:
+            pid_file = tmp_path / "bridge.pid"
+            # File deliberately doesn't exist
+            monkeypatch.setattr("boocloud.bridge._pid_file_path", lambda: pid_file)
+
+            def fake_run(cmd, **kwargs):
+                if cmd[0] == "pgrep":
+                    return subprocess.CompletedProcess(cmd, 0, f"{proc.pid}\n", "")
+                raise FileNotFoundError
+
+            with patch("boocloud.bridge.subprocess.run", side_effect=fake_run):
+                assert _kill_local_daemon() is True
+            proc.wait(timeout=5)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+
+    def test_no_pid_file_no_pgrep_returns_false(self, tmp_path, monkeypatch):
+        pid_file = tmp_path / "bridge.pid"
+        monkeypatch.setattr("boocloud.bridge._pid_file_path", lambda: pid_file)
+        with patch(
+            "boocloud.bridge.subprocess.run",
+            side_effect=FileNotFoundError,  # pgrep not installed
+        ):
+            assert _kill_local_daemon() is False
+
+    def test_does_not_target_own_pid(self, tmp_path, monkeypatch):
+        pid_file = tmp_path / "bridge.pid"
+        # No PID file written
+        monkeypatch.setattr("boocloud.bridge._pid_file_path", lambda: pid_file)
+
+        def fake_run(cmd, **kwargs):
+            if cmd[0] == "pgrep":
+                return subprocess.CompletedProcess(cmd, 0, f"{os.getpid()}\n", "")
+            raise FileNotFoundError
+
+        with patch("boocloud.bridge.subprocess.run", side_effect=fake_run):
+            # Only matched PID is our own → filtered out → nothing to kill.
+            assert _kill_local_daemon() is False
+
+
+class TestPidFilePath:
+    def test_uses_xdg_runtime_dir_when_set(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+        from boocloud.bridge import _pid_file_path
+
+        assert _pid_file_path() == tmp_path / "boocloud-bridge.pid"
+
+    def test_falls_back_to_temp_when_xdg_unset(self, monkeypatch):
+        monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+        from boocloud.bridge import _pid_file_path
+
+        p = _pid_file_path()
+        getuid = getattr(os, "getuid", None)
+        expected = f"boocloud-bridge-{getuid()}.pid" if getuid else "boocloud-bridge.pid"
+        assert p.name == expected
+        # Should be in a known temp dir, not / or cwd
+        assert str(p).startswith(tempfile.gettempdir())
+
+    def test_falls_back_to_temp_without_getuid(self, monkeypatch):
+        """Windows has no ``os.getuid`` — path drops the per-user suffix."""
+        monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+        monkeypatch.delattr(os, "getuid", raising=False)
+        from boocloud.bridge import _pid_file_path
+
+        p = _pid_file_path()
+        assert p.name == "boocloud-bridge.pid"
+        assert str(p).startswith(tempfile.gettempdir())
 
 
 class TestCloudPrintImpl:
