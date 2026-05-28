@@ -1,3 +1,10 @@
+## 0.2.2 — 2026-05-28
+
+### Bugfixes
+
+- ``_kill_local_daemon`` now records the daemon PID via ``_start_daemon`` writing a PID file (``$XDG_RUNTIME_DIR/boocloud-bridge.pid`` or a per-user temp file) and reads it back to target the exact process. This removes the hard dependency on ``pgrep``, which is missing from slim container images like ``python:3.12-slim``. The ``pgrep`` lookup is still used as a fallback when no PID file exists, so daemons started outside ``_start_daemon`` (e.g., the ``boocloud daemon`` CLI on a host with ``procps`` installed) are still covered. ([#daemon-pid-file](https://github.com/estampo/boo-cloud/pull/daemon-pid-file))
+
+
 ## 0.2.1 — 2026-05-28
 
 ### Bugfixes
